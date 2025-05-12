@@ -4,6 +4,7 @@ from openai import OpenAI
 import os, uuid, datetime as dt
 from dotenv import load_dotenv
 import numpy as np
+import json
 
 # 환경 변수 로드
 load_dotenv()
@@ -34,6 +35,65 @@ def get_embedding(text):
         # 기본 임베딩 벡터 생성 (1536 차원)
         return np.zeros(1536).tolist()
 
+def extract_tags(text):
+    try:
+        prompt = f"""다음 내용을 분석해서 주요 키워드나 관심사를 태그 형태로 추출해주세요:
+        {text}
+        
+        JSON 형식으로 응답해주세요:
+        {{"tags": ["태그1", "태그2", "태그3"]}}
+        
+        주의사항:
+        - 태그는 2-4개 정도로 추출해주세요
+        - 구체적인 수치나 시간은 제외해주세요 (예: "5 km" → "러닝")
+        - 일반적인 카테고리나 활동 유형을 중심으로 추출해주세요
+        - "오늘", "요즘" 같은 시간 표현은 제외해주세요
+        """
+        
+        resp = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        
+        result = json.loads(resp.choices[0].message.content)
+        return result.get("tags", [])
+    except Exception as e:
+        print(f"태그 추출 중 오류 발생: {str(e)}")
+        return []
+
+def analyze_sentiment(text):
+    try:
+        prompt = f"""다음 텍스트의 감정을 분석해서 -1.0(매우 부정적)부터 1.0(매우 긍정적) 사이의 점수를 부여해주세요:
+        {text}
+        
+        JSON 형식으로 응답해주세요:
+        {{"sentiment": 0.0}}
+        
+        감정 점수 기준:
+        - 0.8 ~ 1.0: 매우 긍정적 (예: "정말 행복하다", "완벽했다")
+        - 0.5 ~ 0.7: 긍정적 (예: "좋았다", "재미있다")
+        - 0.2 ~ 0.4: 약간 긍정적 (예: "괜찮았다", "진도가 나간다")
+        - -0.1 ~ 0.1: 중립 (예: "했다", "했다")
+        - -0.4 ~ -0.2: 약간 부정적 (예: "힘들었다", "어렵다")
+        - -0.7 ~ -0.5: 부정적 (예: "싫다", "안 좋다")
+        - -1.0 ~ -0.8: 매우 부정적 (예: "최악이다", "실패했다")
+        
+        텍스트의 감정 강도에 따라 더 세밀하게 점수를 부여해주세요.
+        """
+        
+        resp = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        
+        result = json.loads(resp.choices[0].message.content)
+        return result.get("sentiment", 0.0)
+    except Exception as e:
+        print(f"감정 분석 중 오류 발생: {str(e)}")
+        return 0.0
+
 samples = [
     "오늘 러닝 5 km를 뛰었더니 기분이 상쾌했다.",
     "요즘 데이터 시각화 공부가 재밌다.",
@@ -45,13 +105,26 @@ samples = [
 ]
 
 for text in samples:
+    # 태그 추출
+    tags = extract_tags(text)
+    print(f"\n내용: {text}")
+    print(f"추출된 태그: {tags}")
+    
+    # 감정 분석
+    sentiment = analyze_sentiment(text)
+    print(f"감정 점수: {sentiment:.2f}")
+    
+    # 임베딩 생성
     emb = get_embedding(text)
+    
+    # 데이터 저장
     container.upsert_item({
         "id": str(uuid.uuid4()),
         "user_id": "demo",
         "content": text,
-        "tags": [],
-        "sentiment": 0.0,
+        "tags": tags,
+        "sentiment": sentiment,
         "embedding": emb
     })
-print(f"🚀 샘플 {len(samples)}건 업로드 완료")
+
+print(f"\n🚀 샘플 {len(samples)}건 업로드 완료")

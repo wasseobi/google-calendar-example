@@ -188,11 +188,12 @@ def node_query_interests(state: PAState):
         # 최근 14일 문서 벡터 검색 → 태그 추출
         query_vec = embed("recent interests summary")
         
-        # 단순 SQL 쿼리로 변경 (임시)
+        # 실제 데이터 쿼리
         query = """
-        SELECT TOP 5 c.tags, c.content
+        SELECT TOP 5 c.content, c.tags
         FROM c
         WHERE c.user_id = 'demo'
+        ORDER BY c._ts DESC
         """
         
         results = list(container.query_items(
@@ -200,14 +201,42 @@ def node_query_interests(state: PAState):
             enable_cross_partition_query=True
         ))
         
+        print("\n=== 최근 관심사 데이터 ===")
+        for i, row in enumerate(results, 1):
+            print(f"[{i}] {row['content']}")
+        
         # 결과에서 태그 추출
         tags = {tag for row in results for tag in row.get("tags", [])}
-        state.interest_tags = list(tags) if tags else ["운동", "독서", "학습"]  # 기본 태그 제공
         
-        print("✅ 관심사 검색 완료:", state.interest_tags)
+        # 태그가 없는 경우 내용에서 키워드 추출
+        if not tags:
+            openai_client = OpenAI()
+            contents = [row['content'] for row in results]
+            prompt = f"""다음 내용들을 분석해서 주요 키워드나 관심사를 태그 형태로 추출해주세요:
+            {chr(10).join(contents)}
+            
+            JSON 형식으로 응답해주세요:
+            {{"tags": ["태그1", "태그2", "태그3"]}}
+            """
+            
+            resp = openai_client.chat.completions.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            
+            try:
+                result = json.loads(resp.choices[0].message.content)
+                tags = set(result.get("tags", []))
+            except:
+                tags = {"운동", "독서", "학습"}  # 기본 태그
+        
+        state.interest_tags = list(tags)
+        print("\n✅ 관심사 검색 완료:", state.interest_tags)
+        
     except Exception as e:
         print(f"⚠️ 관심사 검색 중 오류 발생: {str(e)}")
-        state.interest_tags = ["운동", "독서", "학습"]  # 오류 시 기본 태그 사용
+        state.interest_tags = ["운동", "독서", "학습"]  # 오류 시 기본 태그
     
     return state
 
@@ -293,19 +322,54 @@ def node_user_confirm(state: PAState):
     print("\n=== AI 제안 ===")
     for i, s in enumerate(state.suggestions):
         print(f"{i+1}. {s['activity']} ({s['duration']}분) – {s['reason']}")
+    
+    # 사용자 선택
     choice = int(input("추가할 번호(0=취소): "))
-    if choice > 0:
-        selected_slot = state.free_slots[0]  # 데모: 첫 free slot 사용
-        duration = min(
-            int(state.suggestions[choice-1]["duration"]),
-            int((selected_slot["end"] - selected_slot["start"]).total_seconds() / 60)
-        )
-        state.accepted = {
-            "start": selected_slot["start"],
-            "end": selected_slot["start"] + timedelta(minutes=duration),
-            "summary": state.suggestions[choice-1]["activity"],
-            "description": state.suggestions[choice-1]["reason"],
-        }
+    if choice <= 0:
+        return state
+    
+    selected_suggestion = state.suggestions[choice-1]
+    duration = int(selected_suggestion["duration"])
+    
+    # 가능한 시간대 표시
+    print("\n=== 가능한 시간대 ===")
+    for i, slot in enumerate(state.free_slots):
+        slot_duration = int((slot["end"] - slot["start"]).total_seconds() / 60)
+        if slot_duration >= duration:
+            print(f"{i+1}. {slot['start'].strftime('%H:%M')}~{slot['end'].strftime('%H:%M')} ({slot_duration}분)")
+    
+    # 시간대 선택
+    slot_choice = int(input("\n원하는 시간대 번호를 선택하세요 (0=취소): "))
+    if slot_choice <= 0:
+        return state
+    
+    selected_slot = state.free_slots[slot_choice-1]
+    slot_duration = int((selected_slot["end"] - selected_slot["start"]).total_seconds() / 60)
+    
+    # 시간 충돌 확인
+    if slot_duration < duration:
+        print(f"\n⚠️ 선택한 시간대({slot_duration}분)가 활동 시간({duration}분)보다 짧습니다.")
+        print("다음 옵션 중 선택해주세요:")
+        print("1. 더 짧은 시간으로 조정")
+        print("2. 다른 시간대 선택")
+        print("3. 취소")
+        
+        option = int(input("선택 (1-3): "))
+        if option == 1:
+            duration = slot_duration
+        elif option == 2:
+            return node_user_confirm(state)
+        else:
+            return state
+    
+    # 일정 생성
+    state.accepted = {
+        "start": selected_slot["start"],
+        "end": selected_slot["start"] + timedelta(minutes=duration),
+        "summary": selected_suggestion["activity"],
+        "description": selected_suggestion["reason"],
+    }
+    
     return state
 
 def node_create_event(state: PAState):
